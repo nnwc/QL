@@ -1,0 +1,12 @@
+依赖
+requests
+beautifulsoup4
+
+环境变量配置：
+RKLT_ACCOUNTS
+值格式：多个账户用 @、& 或换行符分隔，每个账户格式为 用户名:密码
+配置示例：
+RKLT_ACCOUNTS="user1:password1@user2:password2"
+或
+RKLT_ACCOUNTS="user1:password1
+user2:password2"
