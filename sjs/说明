@@ -14,9 +14,3 @@ OCR_SERVICE：自部署的OCR服务地址
 requests
 selenium
 pillow
-
-浏览器驱动：
-确保青龙面板的Docker环境中已安装Chrome浏览器及驱动：
-
-apt-get update
-apt-get install -y chromium chromium-driver
