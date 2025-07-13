@@ -1,4 +1,4 @@
-环境变量 9VIP_ACCOUNTS
+环境变量 VIP9_ACCOUNTS
 
 值为多个账户用 & 连接，每个账户格式为 用户名,密码
 例如：user1,password1&user2,password2
