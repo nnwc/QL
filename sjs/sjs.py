@@ -1,3 +1,4 @@
+import os
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -9,29 +10,53 @@ from io import BytesIO
 import base64
 import time
 import random
-import os
 
 # 所需依赖 requests selenium pillow
 
 # 从环境变量获取配置
-USERNAME = os.environ.get('XSJ_USERNAME', '')
-PASSWORD = os.environ.get('XSJ_PASSWORD', '')
+ACCOUNTS = os.environ.get('XSJ_ACCOUNTS', '')  # 多账户配置
 OCR_SERVICE = os.environ.get('OCR_SERVICE', '')
 main_url = "https://xsijishe.com"
 TIMEOUT = 10
 
 # 检查环境变量是否设置
-if not USERNAME or not PASSWORD or not OCR_SERVICE:
-    print("❌ 错误：请设置环境变量 XSJ_USERNAME, XSJ_PASSWORD 和 OCR_SERVICE")
+if not ACCOUNTS or not OCR_SERVICE:
+    print("❌ 错误：请设置环境变量 XSJ_ACCOUNTS 和 OCR_SERVICE")
     exit(1)
 
 # 登录用到的参数
-formhash = ""
-seccodehash = ""
-referer = ""
-cookies = {}
 sign_url = '/k_misign-sign.html'
-checkIn_status = 2  # 签到状态：0-已签到，1-签到成功，2-失败
+
+def parse_accounts(accounts_str):
+    """解析多账户配置"""
+    accounts = []
+    
+    # 替换所有分隔符为统一的分隔符
+    normalized_str = accounts_str.replace("@", "&").replace("\n", "&")
+    
+    # 分割账户
+    account_list = [acc.strip() for acc in normalized_str.split("&") if acc.strip()]
+    
+    for account_str in account_list:
+        if not account_str:
+            continue
+            
+        # 分割账户信息
+        parts = account_str.split(":", 1)
+        
+        if len(parts) < 2:
+            print(f"❌ 账户信息不完整: {account_str}")
+            continue
+            
+        username = parts[0].strip()
+        password = parts[1].strip()
+        
+        accounts.append({
+            "username": username,
+            "password": password
+        })
+    
+    return accounts
 
 def getrandom(code_len=4):
     chars = 'qazwsxedcrfvtgbyhnujmikolpQAZWSXEDCRFVTGBYHNUJIKOLP'
@@ -39,9 +64,10 @@ def getrandom(code_len=4):
 
 def cookiejar_to_json(Rcookie):
     """将cookiejar转换为json"""
-    global cookies
+    cookies = {}
     for item in Rcookie:
         cookies[item.name] = item.value
+    return cookies
 
 def recognize_captcha(base64_img):
     if "," in base64_img:
@@ -53,7 +79,7 @@ def recognize_captcha(base64_img):
         print(f"🤖 OCR识别错误: {e}")
         return ""
 
-def check_captcha(session, seccodehash, seccodeverify):
+def check_captcha(session, seccodehash, seccodeverify, referer):
     url = f"{main_url}/misc.php"
     params = {
         "mod": "seccode",
@@ -76,41 +102,47 @@ def check_captcha(session, seccodehash, seccodeverify):
         return False
 
 def get_form_info():
-    global formhash, seccodehash, referer, cookies
-
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
     driver = webdriver.Chrome(options=chrome_options)
 
+    formhash = ""
+    seccodehash = ""
+    referer = ""
+    cookies = {}
+    
     try:
         driver.get(main_url + "/home.php?mod=space")
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "referer")))
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "referer")))
         referer_input = driver.find_element(By.NAME, "referer")
         referer = referer_input.get_attribute("value")
 
         driver.get(referer)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "formhash")))
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "formhash")))
         formhash = driver.find_element(By.NAME, "formhash").get_attribute("value")
 
-        seccode_el = WebDriverWait(driver, 10).until(
+        seccode_el = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.XPATH, '//span[starts-with(@id, "seccode_")]'))
         )
         seccodehash = seccode_el.get_attribute("id").replace("seccode_", "")
         cookies = {c['name']: c['value'] for c in driver.get_cookies()}
 
         print(f"📝 [信息] 获取成功: formhash={formhash}, seccodehash={seccodehash}")
-        return True
+        return formhash, seccodehash, referer, cookies
     except Exception as e:
         print(f"⚠️ 获取登录参数失败：{e}")
-        return False
+        return None, None, None, None
     finally:
         driver.quit()
 
-def login_by_requests():
-    if not get_form_info():
-        return False
+def login_by_requests(username, password):
+    formhash, seccodehash, referer, cookies = get_form_info()
+    if not formhash or not seccodehash or not referer:
+        return False, None
 
     session = requests.Session()
     for k, v in cookies.items():
@@ -121,10 +153,12 @@ def login_by_requests():
     })
 
     captcha_url = f"{main_url}/misc.php?mod=seccode&update={int(time.time())}&idhash={seccodehash}"
+    seccodeverify = ""
     for _ in range(5):
         resp = session.get(captcha_url)
         if "image" not in resp.headers.get("Content-Type", ""):
             print("❗ 验证码图片响应异常，重试...")
+            time.sleep(1)
             continue
 
         img = Image.open(BytesIO(resp.content))
@@ -134,21 +168,21 @@ def login_by_requests():
 
         seccodeverify = recognize_captcha(base64_img)
 
-        if len(seccodeverify) == 4 and check_captcha(session, seccodehash, seccodeverify):
+        if len(seccodeverify) == 4 and check_captcha(session, seccodehash, seccodeverify, referer):
             print(f"🤖 [OCR] 验证码识别结果: {seccodeverify} | ✅ [验证通过]")
             break
         else:
             print(f"🤖 [OCR] 验证码识别结果: {seccodeverify}  | ❌ [验证不通过]")
     else:
         print("❌ [失败] 验证码识别/验证失败")
-        return False
+        return False, None
 
     login_url = f"{main_url}/member.php?mod=logging&action=login&loginsubmit=yes&handlekey=login&loginhash=L{getrandom()}&inajax=1"
     payload = {
         "formhash": formhash,
         "referer": referer,
-        "username": USERNAME,
-        "password": PASSWORD,
+        "username": username,
+        "password": password,
         "questionid": "0",
         "answer": "",
         "seccodehash": seccodehash,
@@ -156,21 +190,24 @@ def login_by_requests():
         "seccodeverify": seccodeverify,
     }
 
-    r = session.post(login_url, data=payload, headers={
-        "Content-Type": "application/x-www-form-urlencoded"
-    })
+    try:
+        r = session.post(login_url, data=payload, headers={
+            "Content-Type": "application/x-www-form-urlencoded"
+        }, timeout=15)
 
-    if "欢迎您回来" in r.text:
-        print("🎉 [成功] 登录成功！")
-        cookiejar_to_json(r.cookies)
-        return True
-    else:
-        print(f"❌ [失败] 登录失败：{r.text[:100]}...")  # 截断打印防止过长
-        return False
+        if "欢迎您回来" in r.text:
+            print(f"🎉 [成功] 账户 {username} 登录成功！")
+            return True, cookiejar_to_json(r.cookies)
+        else:
+            print(f"❌ [失败] 账户 {username} 登录失败：{r.text[:100]}...")  # 截断打印防止过长
+            return False, None
+    except Exception as e:
+        print(f"❌ [失败] 登录请求异常: {e}")
+        return False, None
 
-def do_sign_in(driver):
+def do_sign_in(driver, cookies):
     """使用 Selenium 执行签到操作"""
-    global checkIn_status
+    checkIn_status = 2  # 签到状态：0-已签到，1-签到成功，2-失败
 
     try:
         print("⏳ 正在执行签到操作...")
@@ -186,14 +223,14 @@ def do_sign_in(driver):
         print(f"➡️ 访问签到页面: {sign_page_url}")
         driver.get(sign_page_url)
 
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.ID, 'JD_sign')))
 
         page_source = driver.page_source
         if "今日已签" in page_source or "您今天已经签到过了" in page_source:
             print("✅ 今日已签到")
             checkIn_status = 0
-            return True
+            return checkIn_status
 
         sign_button = driver.find_element(By.ID, 'JD_sign')
         print("👉 找到签到按钮，准备点击")
@@ -211,11 +248,11 @@ def do_sign_in(driver):
         if "今日已签" in new_page_source or "您今天已经签到过了" in new_page_source:
             print("✅ 签到成功，页面显示今日已签到")
             checkIn_status = 0
-            return True
+            return checkIn_status
         elif "签到成功" in new_page_source:
             print("🎉 签到成功")
             checkIn_status = 1
-            return True
+            return checkIn_status
         else:
             print("⚠️ 签到后页面未显示成功信息，尝试刷新页面再次确认")
 
@@ -226,23 +263,27 @@ def do_sign_in(driver):
             if "今日已签" in refresh_page_source or "您今天已经签到过了" in refresh_page_source:
                 print("✅ 刷新后确认签到成功")
                 checkIn_status = 0
-                return True
+                return checkIn_status
 
         checkIn_status = 2
         print("❌ 签到失败")
-        return False
+        return checkIn_status
 
     except Exception as e:
-        print(f"❌ 签到过程中出现异常")
-        checkIn_status = 2
-        return False
+        print(f"❌ 签到过程中出现异常: {e}")
+        return 2
 
-def printUserInfo(driver):
+def printUserInfo(driver, cookies, checkIn_status):
     """获取用户信息"""
-    global checkIn_status
-
     try:
         print("🔎 准备获取用户信息...")
+
+        driver.get(main_url)
+        time.sleep(1)
+        
+        driver.delete_all_cookies()
+        for cookie_name, cookie_value in cookies.items():
+            driver.add_cookie({'name': cookie_name, 'value': cookie_value, 'path': '/', 'domain': 'xsijishe.com'})
 
         sign_page_url = f"{main_url}{sign_url}"
         print(f"➡️ 访问签到页面: {sign_page_url}")
@@ -353,24 +394,57 @@ def printUserInfo(driver):
             pass
         return False
 
+def process_account(account):
+    """处理单个账户"""
+    username = account["username"]
+    password = account["password"]
+    
+    print(f"\n======= 开始处理账户: {username} =======")
+    
+    # 登录
+    login_success, cookies = login_by_requests(username, password)
+    if not login_success:
+        print(f"❌ 账户 {username} 登录失败")
+        return
+    
+    # 创建浏览器实例
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(options=chrome_options)
+    
+    try:
+        # 签到
+        checkIn_status = do_sign_in(driver, cookies)
+        if checkIn_status == 0 or checkIn_status == 1:
+            print(f"✔️ 账户 {username} 签到操作完成")
+        else:
+            print(f"❌ 账户 {username} 签到操作失败")
+        
+        # 获取用户信息
+        printUserInfo(driver, cookies, checkIn_status)
+        
+    except Exception as e:
+        print(f"❌ 处理账户 {username} 时发生异常: {e}")
+    finally:
+        driver.quit()
+    
+    print(f"======= 账户 {username} 处理完成 =======\n")
+
 if __name__ == "__main__":
-    if login_by_requests():
-        print("✔️ 登录成功，准备启动浏览器执行签到和信息获取")
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--no-sandbox')
-        driver = webdriver.Chrome(options=chrome_options)
-
-        try:
-            success = do_sign_in(driver)
-            if success:
-                print("✔️ 签到操作完成")
-            else:
-                print("❌ 签到操作失败")
-
-            printUserInfo(driver)
-        finally:
-            driver.quit()
-    else:
-        print("❌ 登录失败，脚本结束")
+    # 解析多账户配置
+    accounts = parse_accounts(ACCOUNTS)
+    
+    if not accounts:
+        print("❌ 没有找到有效的账户配置")
+        exit(1)
+    
+    print(f"🔍 找到 {len(accounts)} 个账户")
+    
+    # 处理每个账户
+    for account in accounts:
+        process_account(account)
+    
+    print("✅ 所有账户处理完成")
