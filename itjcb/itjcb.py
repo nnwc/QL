@@ -3,7 +3,7 @@ import re
 import base64
 import random
 from io import BytesIO
-import os  # 添加os模块用于获取环境变量
+import os
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,36 +16,60 @@ from selenium.webdriver.common.by import By
 
 #需要安装的依赖 requests beautifulsoup4 pillow numpy selenium
 
-
-# --- 配置 ---
 # 从环境变量获取配置
-USERNAME = os.environ.get('USERNAME', '')  # 修改为环境变量
-PASSWORD = os.environ.get('PASSWORD', '')  # 修改为环境变量
-OCR_SERVICE = os.environ.get('OCR_SERVICE', '')  # 修改为环境变量
+ACCOUNTS = os.environ.get('ITJC8_ACCOUNTS', '')  # 多账户配置
+OCR_SERVICE = os.environ.get('OCR_SERVICE', '')  # OCR服务地址
 
 # 检查环境变量是否设置
-if not USERNAME or not PASSWORD or not OCR_SERVICE:
-    print("❌ 错误：请设置环境变量 USERNAME, PASSWORD 和 OCR_SERVICE")
+if not ACCOUNTS or not OCR_SERVICE:
+    print("❌ 错误：请设置环境变量 ITJC8_ACCOUNTS 和 OCR_SERVICE")
     exit(1)
 
 LOGIN_PAGE_URL = "https://www.itjc8.com/member.php?mod=logging&action=login"
 LOGIN_POST_URL = "https://www.itjc8.com/member.php?mod=logging&action=login&loginsubmit=yes&inajax=1"
 SIGN_URL = "https://www.itjc8.com/plugin.php?id=dsu_paulsign:sign&operation=qiandao&infloat=1&sign_as=1&inajax=1"
 
-COOKIE_FILE = "./itlt.txt"
-
-qdxq_list=["kx","ng","ym","wl","nu","ch","fd","yl","shuai"]
-
+COOKIE_FILE_PREFIX = "./itlt_"  # cookie文件前缀
+qdxq_list = ["kx", "ng", "ym", "wl", "nu", "ch", "fd", "yl", "shuai"]
 MAX_RETRY = 3
 
-session = requests.Session()
-
+def parse_accounts(accounts_str):
+    """解析多账户配置"""
+    accounts = []
+    
+    # 替换所有分隔符为统一的分隔符
+    normalized_str = accounts_str.replace("@", "&").replace("\n", "&")
+    
+    # 分割账户
+    account_list = [acc.strip() for acc in normalized_str.split("&") if acc.strip()]
+    
+    for account_str in account_list:
+        if not account_str:
+            continue
+            
+        # 分割账户信息
+        parts = account_str.split(":", 1)
+        
+        if len(parts) < 2:
+            print(f"❌ 账户信息不完整: {account_str}")
+            continue
+            
+        username = parts[0].strip()
+        password = parts[1].strip()
+        
+        accounts.append({
+            "username": username,
+            "password": password
+        })
+    
+    return accounts
 
 def get_page_source_with_selenium(url):
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")  # 添加此选项防止内存问题
     driver = webdriver.Chrome(options=options)
 
     driver.get(url)
@@ -60,7 +84,6 @@ def get_page_source_with_selenium(url):
     html = driver.page_source
     driver.quit()
     return html
-
 
 def parse_login_params(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -97,12 +120,10 @@ def parse_login_params(html):
 
     return formhash, loginhash, seccodehash, seccodemodid, captcha_idhash
 
-
 def fetch_captcha_frames(captcha_idhash):
-    import cv2
     url = f"https://www.itjc8.com/misc.php?mod=seccode&idhash={captcha_idhash}&update={random.randint(100000, 999999)}"
     try:
-        resp = session.get(url, headers={"Referer": LOGIN_PAGE_URL}, timeout=10)
+        resp = requests.get(url, headers={"Referer": LOGIN_PAGE_URL}, timeout=10)
         resp.raise_for_status()
         gif = Image.open(BytesIO(resp.content))
         frames = []
@@ -118,7 +139,6 @@ def fetch_captcha_frames(captcha_idhash):
         print(f"获取验证码帧失败: {e}")
         return []
 
-
 def get_image_sharpness(b64):
     try:
         import cv2
@@ -130,13 +150,12 @@ def get_image_sharpness(b64):
     except Exception:
         return 0
 
-
 def recognize_captcha(frames):
     valid = []
     for f in frames:
         sharpness = get_image_sharpness(f["base64_data"])
         try:
-            r = session.post(OCR_SERVICE, json={"image": f["base64_data"]}, timeout=10)
+            r = requests.post(OCR_SERVICE, json={"image": f["base64_data"]}, timeout=10)
             r.raise_for_status()
             res_json = r.json()
             result = res_json.get("result", "").strip()
@@ -151,36 +170,39 @@ def recognize_captcha(frames):
     valid.sort(key=lambda x: (-x["confidence"], -x["sharpness"]))
     return valid[0]["result"]
 
-
-def save_cookies(filepath):
+def save_cookies(username, cookies):
+    """保存cookie到文件"""
+    cookie_file = f"{COOKIE_FILE_PREFIX}{username}.txt"
     try:
-        cookie_str = "; ".join(f"{c.name}={c.value}" for c in session.cookies)
-        with open(filepath, "w") as f:
+        cookie_str = "; ".join(f"{c.name}={c.value}" for c in cookies)
+        with open(cookie_file, "w") as f:
             f.write(cookie_str)
-        print(f"✅ Cookie 已保存: {filepath}")
+        print(f"✅ Cookie 已保存: {cookie_file}")
     except Exception as e:
         print(f"Cookie保存失败: {e}")
 
-
-def load_cookies(filepath):
-    try:
-        with open(filepath, "r") as f:
-            cookie_str = f.read().strip()
-        cookies = cookie_str.split("; ")
-        for c in cookies:
-            if "=" in c:
-                k, v = c.split("=", 1)
-                session.cookies.set(k, v)
-        print(f"✅ Cookie 已加载: {filepath}")
-        return True
-    except Exception as e:
-        print(f"加载Cookie失败: {e}")
-        return False
-
+def load_cookies(username):
+    """从文件加载cookie"""
+    cookie_file = f"{COOKIE_FILE_PREFIX}{username}.txt"
+    if os.path.exists(cookie_file):
+        try:
+            with open(cookie_file, "r") as f:
+                cookie_str = f.read().strip()
+            cookies = {}
+            for c in cookie_str.split("; "):
+                if "=" in c:
+                    k, v = c.split("=", 1)
+                    cookies[k] = v
+            print(f"✅ Cookie 已加载: {cookie_file}")
+            return cookies
+        except Exception as e:
+            print(f"加载Cookie失败: {e}")
+    return None
 
 def login(username, password):
+    session = requests.Session()
     for attempt in range(1, MAX_RETRY + 1):
-        print(f"\n🔐 第{attempt}次尝试登录...")
+        print(f"\n🔐 账户 {username} 第{attempt}次尝试登录...")
         html = get_page_source_with_selenium(LOGIN_PAGE_URL)
         if not html:
             print("无法获取登录页面源码")
@@ -223,8 +245,8 @@ def login(username, password):
             r.raise_for_status()
             if any(s in r.text for s in ["欢迎您回来", "您已经登录"]):
                 print("🎉 登录成功")
-                save_cookies(COOKIE_FILE)
-                return True
+                save_cookies(username, session.cookies)
+                return session
             else:
                 print(f"登录失败，响应片段：{r.text[:300]}")
         except Exception as e:
@@ -234,20 +256,26 @@ def login(username, password):
         time.sleep(3)
 
     print("❌ 登录失败，达到最大重试次数")
-    return False
+    return None
 
-
-def sign_in():
+def sign_in(username, password):
     # 先尝试从cookie签到
-    print("🔄 尝试签到...")
-    html = get_page_source_with_selenium(LOGIN_PAGE_URL)  # 为了保证cookie生效，刷新一下页面（可选）
-
-    # 先从文件加载cookie
-    if not load_cookies(COOKIE_FILE):
-        print("Cookie文件不存在或加载失败，需登录")
+    print(f"\n🔄 账户 {username} 尝试签到...")
+    
+    # 加载cookie
+    cookies = load_cookies(username)
+    session = requests.Session()
+    
+    if cookies:
+        # 设置cookie
+        for k, v in cookies.items():
+            session.cookies.set(k, v)
+        print("✅ 使用cookie进行签到")
+    else:
+        print("❌ Cookie文件不存在或加载失败")
         return False
 
-    # 使用文件中cookie尝试签到
+    # 使用cookie尝试签到
     # 需要先获取签到时需要的 formhash
     try:
         r = session.get(LOGIN_PAGE_URL, timeout=10)
@@ -298,17 +326,46 @@ def sign_in():
         print(f"签到异常: {e}")
         return False
 
+def process_account(account):
+    """处理单个账户"""
+    username = account["username"]
+    password = account["password"]
+    
+    # 尝试使用cookie签到
+    success = sign_in(username, password)
+    
+    if not success:
+        print(f"需要登录后签到")
+        session = login(username, password)
+        if session:
+            print("登录成功，开始签到...")
+            # 登录后立即尝试签到
+            success = sign_in(username, password)
+            if success:
+                print(f"🎉 账户 {username} 签到完成")
+            else:
+                print(f"❌ 账户 {username} 签到失败")
+        else:
+            print(f"❌ 账户 {username} 登录失败，无法签到")
+    else:
+        print(f"🎉 账户 {username} 使用Cookie签到成功")
+    
+    return success
 
 if __name__ == "__main__":
-    if not sign_in():
-        print("需要登录后签到")
-        if login(USERNAME, PASSWORD):
-            print("登录成功，开始签到...")
-            if sign_in():
-                print("🎉 签到完成")
-            else:
-                print("❌ 签到失败")
-        else:
-            print("❌ 登录失败，无法签到")
-    else:
-        print("🎉 使用Cookie签到成功")
+    # 解析多账户配置
+    accounts = parse_accounts(ACCOUNTS)
+    
+    if not accounts:
+        print("❌ 没有找到有效的账户配置")
+        exit(1)
+    
+    print(f"🔍 找到 {len(accounts)} 个账户")
+    
+    # 处理每个账户
+    success_count = 0
+    for account in accounts:
+        if process_account(account):
+            success_count += 1
+    
+    print(f"\n✅ 所有账户处理完成，成功: {success_count}/{len(accounts)}")
