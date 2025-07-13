@@ -8,6 +8,7 @@ import random
 import re
 from bs4 import BeautifulSoup
 import json
+import sys
 
 # 所需依赖 requests pillow
 
@@ -18,10 +19,15 @@ main_url = "https://xsijishe.com"
 TIMEOUT = 10
 MAX_RETRY = 3
 
+# 调试信息
+print(f"环境变量 XSJ_ACCOUNTS 长度: {len(ACCOUNTS)}")
+print(f"环境变量 OCR_SERVICE: {OCR_SERVICE}")
+
 # 检查环境变量是否设置
-if not ACCOUNTS or not OCR_SERVICE:
-    print("❌ 错误：请设置环境变量 XSJ_ACCOUNTS 和 OCR_SERVICE")
-    exit(1)
+if not ACCOUNTS.strip() or not OCR_SERVICE.strip():
+    print("❌ 错误：环境变量 XSJ_ACCOUNTS 或 OCR_SERVICE 未设置或为空")
+    print("请确保在运行环境中正确设置了这两个环境变量")
+    sys.exit(1)
 
 # 登录用到的参数
 sign_url = '/k_misign-sign.html'
@@ -401,7 +407,8 @@ if __name__ == "__main__":
     
     if not accounts:
         print("❌ 没有找到有效的账户配置")
-        exit(1)
+        print(f"原始账户字符串: {ACCOUNTS[:50]}...")
+        sys.exit(1)
     
     print(f"🔍 找到 {len(accounts)} 个账户")
     
