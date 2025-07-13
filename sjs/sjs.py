@@ -14,18 +14,18 @@ import sys
 
 # 从环境变量获取配置
 ACCOUNTS = os.environ.get('XSJ_ACCOUNTS', '')  # 多账户配置
-OCR_SERVICE = os.environ.get('OCR_SERVICE', '')
+OCR_SERVER = os.environ.get('OCR_SERVER', '')  # 修改为 OCR_SERVER
 main_url = "https://xsijishe.com"
 TIMEOUT = 10
 MAX_RETRY = 3
 
 # 调试信息
 print(f"环境变量 XSJ_ACCOUNTS 长度: {len(ACCOUNTS)}")
-print(f"环境变量 OCR_SERVICE: {OCR_SERVICE}")
+print(f"环境变量 OCR_SERVER: {OCR_SERVER}")
 
 # 检查环境变量是否设置
-if not ACCOUNTS.strip() or not OCR_SERVICE.strip():
-    print("❌ 错误：环境变量 XSJ_ACCOUNTS 或 OCR_SERVICE 未设置或为空")
+if not ACCOUNTS.strip() or not OCR_SERVER.strip():
+    print("❌ 错误：环境变量 XSJ_ACCOUNTS 或 OCR_SERVER 未设置或为空")
     print("请确保在运行环境中正确设置了这两个环境变量")
     sys.exit(1)
 
@@ -85,16 +85,41 @@ def get_session_headers():
     }
 
 def recognize_captcha(base64_img):
-    """识别验证码"""
+    """识别验证码 - 增强错误处理"""
+    if not OCR_SERVER:
+        print("❌ OCR服务未配置")
+        return ""
+    
     if "," in base64_img:
         base64_img = base64_img.split(",", 1)[1]
+    
     try:
-        resp = requests.post(OCR_SERVICE, json={"image": base64_img}, timeout=TIMEOUT)
-        if resp.ok:
-            return resp.json().get("result", "").strip()
+        # 添加超时和重试机制
+        for attempt in range(1, 4):
+            try:
+                resp = requests.post(
+                    OCR_SERVER, 
+                    json={"image": base64_img}, 
+                    timeout=TIMEOUT
+                )
+                
+                if resp.status_code == 200:
+                    result = resp.json().get("result", "").strip()
+                    if result:
+                        return result
+                
+                print(f"🤖 OCR识别失败 ({resp.status_code}): {resp.text[:100]}")
+            except requests.exceptions.Timeout:
+                print(f"🤖 OCR服务超时 (尝试 {attempt}/3)")
+            except Exception as e:
+                print(f"🤖 OCR识别错误: {e}")
+            
+            # 失败后等待重试
+            time.sleep(1)
+        
         return ""
     except Exception as e:
-        print(f"🤖 OCR识别错误: {e}")
+        print(f"🤖 OCR识别严重错误: {e}")
         return ""
 
 def get_form_info(session):
@@ -189,6 +214,14 @@ def login_account(username, password):
         
         # 识别验证码
         img = Image.open(BytesIO(captcha_resp.content))
+        
+        # 保存验证码图片用于调试
+        if not os.path.exists("captchas"):
+            os.makedirs("captchas")
+        img_path = f"captchas/{int(time.time())}.jpg"
+        img.save(img_path)
+        print(f"📸 验证码已保存到: {img_path}")
+        
         buffer = BytesIO()
         img.save(buffer, format="JPEG")
         base64_img = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
@@ -231,7 +264,14 @@ def login_account(username, password):
                 soup = BeautifulSoup(r.text, 'html.parser')
                 error_msg = soup.find('div', class_='alert_error')
                 if error_msg:
-                    print(f"❌ 登录失败: {error_msg.get_text(strip=True)}")
+                    error_text = error_msg.get_text(strip=True)
+                    print(f"❌ 登录失败: {error_text}")
+                    
+                    # 特殊处理：验证码错误
+                    if "验证码" in error_text:
+                        print("🔄 验证码错误，重新尝试...")
+                        time.sleep(2)
+                        continue
                 else:
                     print(f"❌ 登录失败，未知响应: {r.text[:100]}...")
         except Exception as e:
