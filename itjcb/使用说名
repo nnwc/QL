@@ -1,0 +1,16 @@
+添加环境变量：
+USERNAME：你的账号
+PASSWORD：你的密码
+OCR_SERVICE：自部署的OCR服务地址
+
+
+依赖文件：
+requests
+beautifulsoup4
+pillow
+numpy
+selenium
+
+在青龙面板的Docker环境中安装Chrome：
+apt-get update
+apt-get install -y chromium chromium-driver
