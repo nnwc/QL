@@ -2,12 +2,20 @@
 使用抓包工具（如Charles或Fiddler）抓取 https://bxo30.xyz/api/user/qd 请求
 获取请求体中的 encryptedData 和 iv 参数值
 
-青龙面板环境变量配置：
+环境变量配置：
+MHS_ACCOUNTS：多账户配置，格式为：
+用户名1:密码1:encryptedData1:iv1&用户名2:密码2:encryptedData2:iv2
+多账户使用 & @ 换行隔开 
 
-MHS_USERNAME: 你的账号
-MHS_PASSWORD: 你的密码
-MHS_ENCRYPTED_DATA: 抓取到的 encryptedData 值
-MHS_IV: 抓取到的 iv 值
+青龙面板配置示例：
+
+单行格式（使用&分隔）：
+MHS_ACCOUNTS='user1:pass1:encryptedData1:iv1&user2:pass2:encryptedData2:iv2'
+单行格式（使用@分隔）：
+MHS_ACCOUNTS='user1:pass1:encryptedData1:iv1@user2:pass2:encryptedData2:iv2'
+多行格式：
+MHS_ACCOUNTS='user1:pass1:encryptedData1:iv1
+user2:pass2:encryptedData2:iv2'
 
 依赖安装：
 pycryptodomex
