@@ -15,13 +15,11 @@ import http.client  # 调试用
 # 调试模式开关
 DEBUG_MODE = False  # 设置为True启用请求日志
 
-# 所需依赖 requests pillow
-
-# 从环境变量获取配置
-ACCOUNTS = os.environ.get('XSJ_ACCOUNTS', '')  # 多账户配置
+# 配置参数
+ACCOUNTS = os.environ.get('XSJ_ACCOUNTS', '')  # 格式：user1:pass1@user2:pass2
 OCR_SERVICE = os.environ.get('OCR_SERVICE', '')
 main_url = "https://xsijishe.com"
-TIMEOUT = 15  # 延长超时时间
+TIMEOUT = 20  # 延长超时时间
 MAX_RETRY = 3
 COOLDOWN = {7: 300, 3: 600, 1: 1800}  # 剩余次数对应的冷却时间（秒）
 
@@ -35,16 +33,27 @@ if DEBUG_MODE:
     requests_log.setLevel(logging.DEBUG)
     requests_log.propagate = True
 
-# 登录用到的参数
-sign_url = '/k_misign-sign.html'
-
 def parse_accounts(accounts_str):
-    """解析多账户配置（保持不变）"""
-    # ...（原有实现不变）...
+    """解析多账户配置"""
+    accounts = []
+    if not accounts_str:
+        return accounts
+    
+    account_list = accounts_str.split('@')
+    for acc in account_list:
+        if ':' in acc:
+            user, pwd = acc.split(':', 1)
+            accounts.append({'username': user.strip(), 'password': pwd.strip()})
+    return accounts
 
 def get_random_user_agent():
-    """生成随机User-Agent（保持不变）"""
-    # ...（原有实现不变）...
+    """生成随机User-Agent"""
+    agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0'
+    ]
+    return random.choice(agents)
 
 def get_session_headers():
     """获取增强的会话请求头"""
@@ -289,8 +298,80 @@ def login_account(username, password):
     print(f"❌ 账户 {username} 登录失败，达到最大重试次数")
     return None
 
-# 后续的 do_sign_in 和 get_user_info 函数保持不变（但建议添加重试机制）
-# ...（原有实现保持不变，可添加重试逻辑）...
+def do_sign_in(session):
+    """执行签到（带重试机制）"""
+    for retry in range(MAX_RETRY):
+        try:
+            sign_resp = session.get(main_url + sign_url, timeout=TIMEOUT)
+            soup = BeautifulSoup(sign_resp.text, 'html.parser')
+            
+            # 检查是否已签到
+            if "已签到" in sign_resp.text:
+                print("✅ 今日已完成签到")
+                return True
+                
+            # 获取签到参数
+            formhash = soup.find('input', {'name': 'formhash'})['value']
+            sign_submit = soup.find('input', {'name': 'signsubmit'})['value']
+            
+            # 提交签到
+            payload = {
+                'formhash': formhash,
+                'signsubmit': sign_submit,
+                'todaysay': random.choice(['签到成功！', '每日签到', '自动签到']),
+                'fastreply': '1'
+            }
+            result = session.post(main_url + sign_url, data=payload, timeout=TIMEOUT)
+            
+            if "签到成功" in result.text:
+                print("🎉 签到成功！")
+                return True
+            else:
+                print("❌ 签到失败")
+                return False
+        except Exception as e:
+            print(f"⚠️ 签到失败（尝试 {retry+1}/{MAX_RETRY}）: {e}")
+            time.sleep(2)
+    return False
+
+def get_user_info(session):
+    """获取用户信息（带重试机制）"""
+    for retry in range(MAX_RETRY):
+        try:
+            profile_url = f"{main_url}/home.php?mod=space"
+            resp = session.get(profile_url, timeout=TIMEOUT)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # 提取用户信息
+            username = soup.find('span', {'class': 'xw1'}).text.strip()
+            credits = soup.find('li', text=re.compile(r'积分')).text.strip()
+            level = soup.find('div', {'class': 'hdc'}).find('h2').text.strip()
+            
+            print(f"👤 用户信息 - 用户名: {username}")
+            print(f"🏅 等级: {level}")
+            print(f"💰 {credits}")
+            return True
+        except Exception as e:
+            print(f"⚠️ 获取用户信息失败（尝试 {retry+1}/{MAX_RETRY}）: {e}")
+            time.sleep(2)
+    return False
 
 if __name__ == "__main__":
-    # ...（主流程保持不变）...
+    accounts = parse_accounts(ACCOUNTS)
+    if not accounts:
+        print("❌ 未找到有效账户配置")
+        sys.exit(1)
+        
+    for account in accounts:
+        session = login_account(account['username'], account['password'])
+        if session:
+            # 执行签到
+            do_sign_in(session)
+            
+            # 获取用户信息
+            get_user_info(session)
+            
+            # 关闭会话
+            session.close()
+            print("➖➖➖➖➖➖➖➖➖➖")
+            time.sleep(random.randint(5, 10))
