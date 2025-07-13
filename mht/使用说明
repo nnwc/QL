@@ -1,0 +1,14 @@
+
+环境变量 BDZYYI_COOKIES
+值格式支持两种：
+多账户分隔格式：cookie1; cookie2; cookie3 用 @、& 或换行符分隔
+JSON 格式：{"key1": "value1", "key2": "value2"}
+多账户配置示例：
+env
+# 格式1：多个Cookie字符串用@分隔
+BDZYYI_COOKIES="wordpress_logged_in_xxx=值1; PHPSESSID=值1@wordpress_logged_in_yyy=值2; PHPSESSID=值2"
+# 格式2：JSON数组格式
+BDZYYI_COOKIES='[{"wordpress_logged_in_xxx": "值1", "PHPSESSID": "值1"}, {"wordpress_logged_in_yyy": "值2", "PHPSESSID": "值2"}]'
+
+依赖
+httpx[http2]
