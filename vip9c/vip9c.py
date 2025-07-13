@@ -3,9 +3,9 @@ import os
 import hashlib
 
 # 从青龙环境变量获取账户列表
-ACCOUNTS = os.getenv('9VIP_ACCOUNTS', '')
+ACCOUNTS = os.getenv('VIP9_ACCOUNTS', '')
 if not ACCOUNTS:
-    print("⚠️ 未检测到环境变量9VIP_ACCOUNTS，请添加你的账户信息")
+    print("⚠️ 未检测到环境变量VIP9_ACCOUNTS，请添加你的账户信息")
     exit(1)
 
 # 解析账户信息
@@ -22,7 +22,7 @@ if not account_list:
 # 基础配置
 LOGIN_URL = "https://vipc9.com/wp-admin/admin-ajax.php"
 SIGN_URL = LOGIN_URL
-COOKIE_DIR = "./9vip_cookies"
+COOKIE_DIR = "./VIP9_cookies"
 HEADERS_BASE = {
     "Origin": "https://vipc9.com",
     "Referer": "https://vipc9.com/",
@@ -138,7 +138,7 @@ def process_account(username, password):
 
 
 if __name__ == "__main__":
-    print(f"🌟 9VIP 多账户签到脚本开始，共 {len(account_list)} 个账户 🌟")
+    print(f"🌟 VIP9 多账户签到脚本开始，共 {len(account_list)} 个账户 🌟")
     
     for idx, (username, password) in enumerate(account_list, 1):
         print(f"\n🔰 处理账户 {idx}/{len(account_list)}: {username}")
