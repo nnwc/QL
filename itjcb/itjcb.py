@@ -10,11 +10,7 @@ from bs4 import BeautifulSoup
 from PIL import Image
 import numpy as np
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-
-#需要安装的依赖 requests beautifulsoup4 pillow numpy selenium
+#需要安装的依赖 requests beautifulsoup4 pillow numpy
 
 # 从环境变量获取配置
 ACCOUNTS = os.environ.get('ITJC8_ACCOUNTS', '')  # 多账户配置
@@ -32,6 +28,25 @@ SIGN_URL = "https://www.itjc8.com/plugin.php?id=dsu_paulsign:sign&operation=qian
 COOKIE_FILE_PREFIX = "./itlt_"  # cookie文件前缀
 qdxq_list = ["kx", "ng", "ym", "wl", "nu", "ch", "fd", "yl", "shuai"]
 MAX_RETRY = 3
+
+# 随机User-Agent列表
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
+]
+
+def get_random_headers():
+    """生成随机请求头"""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.itjc8.com/"
+    }
 
 def parse_accounts(accounts_str):
     """解析多账户配置"""
@@ -63,27 +78,6 @@ def parse_accounts(accounts_str):
         })
     
     return accounts
-
-def get_page_source_with_selenium(url):
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")  # 添加此选项防止内存问题
-    driver = webdriver.Chrome(options=options)
-
-    driver.get(url)
-    time.sleep(3)
-    try:
-        driver.find_element(By.CSS_SELECTOR, "span[id^='seccode_']")
-    except Exception:
-        print("验证码区域未找到，页面可能未完全加载")
-        driver.quit()
-        return None
-
-    html = driver.page_source
-    driver.quit()
-    return html
 
 def parse_login_params(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -120,10 +114,10 @@ def parse_login_params(html):
 
     return formhash, loginhash, seccodehash, seccodemodid, captcha_idhash
 
-def fetch_captcha_frames(captcha_idhash):
+def fetch_captcha_frames(session, captcha_idhash):
     url = f"https://www.itjc8.com/misc.php?mod=seccode&idhash={captcha_idhash}&update={random.randint(100000, 999999)}"
     try:
-        resp = requests.get(url, headers={"Referer": LOGIN_PAGE_URL}, timeout=10)
+        resp = session.get(url, headers=get_random_headers(), timeout=15)
         resp.raise_for_status()
         gif = Image.open(BytesIO(resp.content))
         frames = []
@@ -155,7 +149,7 @@ def recognize_captcha(frames):
     for f in frames:
         sharpness = get_image_sharpness(f["base64_data"])
         try:
-            r = requests.post(OCR_SERVICE, json={"image": f["base64_data"]}, timeout=10)
+            r = requests.post(OCR_SERVICE, json={"image": f["base64_data"]}, timeout=15)
             r.raise_for_status()
             res_json = r.json()
             result = res_json.get("result", "").strip()
@@ -201,57 +195,77 @@ def load_cookies(username):
 
 def login(username, password):
     session = requests.Session()
+    session.headers.update(get_random_headers())
+    
     for attempt in range(1, MAX_RETRY + 1):
         print(f"\n🔐 账户 {username} 第{attempt}次尝试登录...")
-        html = get_page_source_with_selenium(LOGIN_PAGE_URL)
-        if not html:
-            print("无法获取登录页面源码")
-            continue
-
-        formhash, loginhash, seccodehash, seccodemodid, captcha_idhash = parse_login_params(html)
-        print(f"获取参数: formhash={formhash}, loginhash={loginhash}, seccodehash={seccodehash}, seccodemodid={seccodemodid}, captcha_idhash={captcha_idhash}")
-
-        if not all([formhash, loginhash, seccodehash, seccodemodid, captcha_idhash]):
-            print("动态参数不完整，重新尝试...")
-            continue
-
-        frames = fetch_captcha_frames(captcha_idhash)
-        if not frames:
-            print("无法获取验证码图片，重新尝试...")
-            continue
-
-        captcha = recognize_captcha(frames)
-        if not captcha:
-            print("验证码识别失败，重新尝试...")
-            continue
-
-        print(f"识别验证码: {captcha}")
-
-        post_data = {
-            "formhash": formhash,
-            "referer": "https://www.itjc8.com/",
-            "username": username,
-            "password": password,
-            "questionid": "0",
-            "answer": "",
-            "seccodehash": seccodehash,
-            "seccodemodid": seccodemodid,
-            "seccodeverify": captcha,
-        }
-
+        
         try:
-            full_url = f"{LOGIN_POST_URL}&loginhash={loginhash}"
-            r = session.post(full_url, data=post_data, timeout=15)
+            # 获取登录页面
+            r = session.get(LOGIN_PAGE_URL, timeout=15)
             r.raise_for_status()
-            if any(s in r.text for s in ["欢迎您回来", "您已经登录"]):
+            html = r.text
+            
+            formhash, loginhash, seccodehash, seccodemodid, captcha_idhash = parse_login_params(html)
+            print(f"获取参数: formhash={formhash}, loginhash={loginhash}, seccodehash={seccodehash}, seccodemodid={seccodemodid}, captcha_idhash={captcha_idhash}")
+
+            if not all([formhash, loginhash, seccodehash, seccodemodid, captcha_idhash]):
+                print("动态参数不完整，重新尝试...")
+                time.sleep(2)
+                continue
+
+            frames = fetch_captcha_frames(session, captcha_idhash)
+            if not frames:
+                print("无法获取验证码图片，重新尝试...")
+                time.sleep(2)
+                continue
+
+            captcha = recognize_captcha(frames)
+            if not captcha:
+                print("验证码识别失败，重新尝试...")
+                time.sleep(2)
+                continue
+
+            print(f"识别验证码: {captcha}")
+
+            post_data = {
+                "formhash": formhash,
+                "referer": "https://www.itjc8.com/",
+                "username": username,
+                "password": password,
+                "questionid": "0",
+                "answer": "",
+                "seccodehash": seccodehash,
+                "seccodemodid": seccodemodid,
+                "seccodeverify": captcha,
+            }
+
+            full_url = f"{LOGIN_POST_URL}&loginhash={loginhash}"
+            r = session.post(full_url, data=post_data, timeout=20)
+            r.raise_for_status()
+            
+            # 检查登录结果
+            if any(s in r.text for s in ["欢迎您回来", "您已经登录", "登录成功"]):
                 print("🎉 登录成功")
                 save_cookies(username, session.cookies)
                 return session
             else:
                 print(f"登录失败，响应片段：{r.text[:300]}")
+                
+                # 尝试从响应中提取错误信息
+                soup = BeautifulSoup(r.text, 'html.parser')
+                if error_div := soup.find('div', class_='alert_error'):
+                    error_msg = error_div.get_text(strip=True)
+                    print(f"❌ 错误信息: {error_msg}")
+                elif error_div := soup.find('div', class_='alert_info'):
+                    error_msg = error_div.get_text(strip=True)
+                    print(f"⚠️ 提示信息: {error_msg}")
+                    
+        except requests.exceptions.RequestException as e:
+            print(f"网络请求异常: {e}")
         except Exception as e:
-            print(f"登录请求异常: {e}")
-
+            print(f"登录过程异常: {e}")
+        
         print("3秒后重试...")
         time.sleep(3)
 
@@ -265,26 +279,32 @@ def sign_in(username, password):
     # 加载cookie
     cookies = load_cookies(username)
     session = requests.Session()
+    session.headers.update(get_random_headers())
     
     if cookies:
         # 设置cookie
-        for k, v in cookies.items():
-            session.cookies.set(k, v)
+        session.cookies.update(cookies)
         print("✅ 使用cookie进行签到")
     else:
         print("❌ Cookie文件不存在或加载失败")
         return False
 
     # 使用cookie尝试签到
-    # 需要先获取签到时需要的 formhash
     try:
-        r = session.get(LOGIN_PAGE_URL, timeout=10)
+        # 获取首页以获取formhash
+        r = session.get("https://www.itjc8.com/", timeout=10)
         r.raise_for_status()
+        
+        # 检查登录状态
+        if "退出" not in r.text:
+            print("❌ Cookie失效，需要重新登录")
+            return False
+            
         soup = BeautifulSoup(r.text, "html.parser")
         formhash_tag = soup.find("input", {"name": "formhash"})
         formhash = formhash_tag['value'] if formhash_tag else None
         if not formhash:
-            print("无法获取签到formhash，可能cookie失效")
+            print("无法获取签到formhash")
             return False
 
         day_xq = random.choice(qdxq_list)
@@ -296,11 +316,8 @@ def sign_in(username, password):
             "todaysay": "",
             "fastreply": "0",
         }
-        headers = {
-            "Referer": "https://www.itjc8.com/",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        sign_resp = session.post(SIGN_URL, data=post_data, headers=headers, timeout=10)
+        
+        sign_resp = session.post(SIGN_URL, data=post_data, timeout=15)
         sign_resp.raise_for_status()
 
         text = sign_resp.text
@@ -367,5 +384,6 @@ if __name__ == "__main__":
     for account in accounts:
         if process_account(account):
             success_count += 1
+        print("\n" + "="*50 + "\n")  # 账户分隔线
     
     print(f"\n✅ 所有账户处理完成，成功: {success_count}/{len(accounts)}")
