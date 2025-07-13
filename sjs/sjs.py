@@ -1,23 +1,22 @@
 import os
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from PIL import Image
 from io import BytesIO
 import base64
 import time
 import random
+import re
+from bs4 import BeautifulSoup
+import json
 
-# 所需依赖 requests selenium pillow
+# 所需依赖 requests pillow
 
 # 从环境变量获取配置
 ACCOUNTS = os.environ.get('XSJ_ACCOUNTS', '')  # 多账户配置
 OCR_SERVICE = os.environ.get('OCR_SERVICE', '')
 main_url = "https://xsijishe.com"
 TIMEOUT = 10
+MAX_RETRY = 3
 
 # 检查环境变量是否设置
 if not ACCOUNTS or not OCR_SERVICE:
@@ -58,28 +57,86 @@ def parse_accounts(accounts_str):
     
     return accounts
 
-def getrandom(code_len=4):
-    chars = 'qazwsxedcrfvtgbyhnujmikolpQAZWSXEDCRFVTGBYHNUJIKOLP'
-    return ''.join(random.choices(chars, k=code_len))
+def get_random_user_agent():
+    """生成随机User-Agent"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
+    ]
+    return random.choice(user_agents)
 
-def cookiejar_to_json(Rcookie):
-    """将cookiejar转换为json"""
-    cookies = {}
-    for item in Rcookie:
-        cookies[item.name] = item.value
-    return cookies
+def get_session_headers():
+    """获取会话请求头"""
+    return {
+        "User-Agent": get_random_user_agent(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": main_url
+    }
 
 def recognize_captcha(base64_img):
+    """识别验证码"""
     if "," in base64_img:
         base64_img = base64_img.split(",", 1)[1]
     try:
         resp = requests.post(OCR_SERVICE, json={"image": base64_img}, timeout=TIMEOUT)
-        return resp.json().get("result", "").strip() if resp.ok else ""
+        if resp.ok:
+            return resp.json().get("result", "").strip()
+        return ""
     except Exception as e:
         print(f"🤖 OCR识别错误: {e}")
         return ""
 
+def get_form_info(session):
+    """获取登录表单信息"""
+    for _ in range(MAX_RETRY):
+        try:
+            # 第一步：获取登录页面
+            login_page_url = f"{main_url}/member.php?mod=logging&action=login"
+            r = session.get(login_page_url, timeout=TIMEOUT)
+            r.raise_for_status()
+            
+            soup = BeautifulSoup(r.text, 'html.parser')
+            
+            # 获取formhash
+            formhash_input = soup.find('input', {'name': 'formhash'})
+            formhash = formhash_input['value'] if formhash_input else None
+            
+            # 获取referer
+            referer_input = soup.find('input', {'name': 'referer'})
+            referer = referer_input['value'] if referer_input else main_url
+            
+            # 获取seccodehash
+            seccode_span = soup.find('span', id=re.compile(r'^seccode_'))
+            if seccode_span:
+                seccodehash = seccode_span['id'].replace('seccode_', '')
+            else:
+                # 备选方案：从验证码图片URL中提取
+                captcha_img = soup.find('img', id=re.compile(r'^seccode_'))
+                if captcha_img and 'src' in captcha_img.attrs:
+                    src = captcha_img['src']
+                    match = re.search(r'idhash=([a-zA-Z0-9]+)', src)
+                    seccodehash = match.group(1) if match else None
+            
+            if formhash and seccodehash and referer:
+                print(f"📝 获取登录参数成功: formhash={formhash}, seccodehash={seccodehash}")
+                return formhash, seccodehash, referer
+            
+            print("⚠️ 部分登录参数缺失，重试中...")
+            time.sleep(2)
+        except Exception as e:
+            print(f"⚠️ 获取登录参数失败: {e}")
+            time.sleep(2)
+    
+    print("❌ 无法获取登录参数，达到最大重试次数")
+    return None, None, None
+
 def check_captcha(session, seccodehash, seccodeverify, referer):
+    """检查验证码是否正确"""
     url = f"{main_url}/misc.php"
     params = {
         "mod": "seccode",
@@ -89,309 +146,229 @@ def check_captcha(session, seccodehash, seccodeverify, referer):
         "idhash": seccodehash,
         "secverify": seccodeverify
     }
-    headers = {
-        "Referer": referer,
-        "User-Agent": session.headers.get("User-Agent", ""),
-        "X-Requested-With": "XMLHttpRequest"
-    }
     try:
-        r = session.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        r = session.get(url, params=params, timeout=TIMEOUT)
         return r.ok and "succeed" in r.text
     except Exception as e:
         print(f"❌ 验证码校验异常: {e}")
         return False
 
-def get_form_info():
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    driver = webdriver.Chrome(options=chrome_options)
-
-    formhash = ""
-    seccodehash = ""
-    referer = ""
-    cookies = {}
-    
-    try:
-        driver.get(main_url + "/home.php?mod=space")
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "referer")))
-        referer_input = driver.find_element(By.NAME, "referer")
-        referer = referer_input.get_attribute("value")
-
-        driver.get(referer)
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.NAME, "formhash")))
-        formhash = driver.find_element(By.NAME, "formhash").get_attribute("value")
-
-        seccode_el = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.XPATH, '//span[starts-with(@id, "seccode_")]'))
-        )
-        seccodehash = seccode_el.get_attribute("id").replace("seccode_", "")
-        cookies = {c['name']: c['value'] for c in driver.get_cookies()}
-
-        print(f"📝 [信息] 获取成功: formhash={formhash}, seccodehash={seccodehash}")
-        return formhash, seccodehash, referer, cookies
-    except Exception as e:
-        print(f"⚠️ 获取登录参数失败：{e}")
-        return None, None, None, None
-    finally:
-        driver.quit()
-
-def login_by_requests(username, password):
-    formhash, seccodehash, referer, cookies = get_form_info()
-    if not formhash or not seccodehash or not referer:
-        return False, None
-
+def login_account(username, password):
+    """登录账户"""
     session = requests.Session()
-    for k, v in cookies.items():
-        session.cookies.set(k, v)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/114.0 Safari/537.36",
-        "Referer": referer
-    })
-
-    captcha_url = f"{main_url}/misc.php?mod=seccode&update={int(time.time())}&idhash={seccodehash}"
-    seccodeverify = ""
-    for _ in range(5):
-        resp = session.get(captcha_url)
-        if "image" not in resp.headers.get("Content-Type", ""):
-            print("❗ 验证码图片响应异常，重试...")
-            time.sleep(1)
+    session.headers.update(get_session_headers())
+    
+    print(f"\n🔐 开始登录账户: {username}")
+    
+    for attempt in range(1, MAX_RETRY + 1):
+        print(f"⏳ 尝试 #{attempt}")
+        
+        # 获取登录参数
+        formhash, seccodehash, referer = get_form_info(session)
+        if not formhash or not seccodehash:
             continue
-
-        img = Image.open(BytesIO(resp.content))
+            
+        # 获取验证码
+        captcha_url = f"{main_url}/misc.php?mod=seccode&update={int(time.time())}&idhash={seccodehash}"
+        try:
+            captcha_resp = session.get(captcha_url, timeout=TIMEOUT)
+            if "image" not in captcha_resp.headers.get("Content-Type", ""):
+                print("❗ 验证码图片响应异常")
+                time.sleep(2)
+                continue
+        except Exception as e:
+            print(f"❌ 获取验证码失败: {e}")
+            time.sleep(2)
+            continue
+        
+        # 识别验证码
+        img = Image.open(BytesIO(captcha_resp.content))
         buffer = BytesIO()
         img.save(buffer, format="JPEG")
         base64_img = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
-
-        seccodeverify = recognize_captcha(base64_img)
-
-        if len(seccodeverify) == 4 and check_captcha(session, seccodehash, seccodeverify, referer):
-            print(f"🤖 [OCR] 验证码识别结果: {seccodeverify} | ✅ [验证通过]")
-            break
-        else:
-            print(f"🤖 [OCR] 验证码识别结果: {seccodeverify}  | ❌ [验证不通过]")
-    else:
-        print("❌ [失败] 验证码识别/验证失败")
-        return False, None
-
-    login_url = f"{main_url}/member.php?mod=logging&action=login&loginsubmit=yes&handlekey=login&loginhash=L{getrandom()}&inajax=1"
-    payload = {
-        "formhash": formhash,
-        "referer": referer,
-        "username": username,
-        "password": password,
-        "questionid": "0",
-        "answer": "",
-        "seccodehash": seccodehash,
-        "seccodemodid": "member::logging",
-        "seccodeverify": seccodeverify,
-    }
-
-    try:
-        r = session.post(login_url, data=payload, headers={
-            "Content-Type": "application/x-www-form-urlencoded"
-        }, timeout=15)
-
-        if "欢迎您回来" in r.text:
-            print(f"🎉 [成功] 账户 {username} 登录成功！")
-            return True, cookiejar_to_json(r.cookies)
-        else:
-            print(f"❌ [失败] 账户 {username} 登录失败：{r.text[:100]}...")  # 截断打印防止过长
-            return False, None
-    except Exception as e:
-        print(f"❌ [失败] 登录请求异常: {e}")
-        return False, None
-
-def do_sign_in(driver, cookies):
-    """使用 Selenium 执行签到操作"""
-    checkIn_status = 2  # 签到状态：0-已签到，1-签到成功，2-失败
-
-    try:
-        print("⏳ 正在执行签到操作...")
-
-        driver.get(main_url)
-        time.sleep(1)
-
-        driver.delete_all_cookies()
-        for cookie_name, cookie_value in cookies.items():
-            driver.add_cookie({'name': cookie_name, 'value': cookie_value, 'path': '/', 'domain': 'xsijishe.com'})
-
-        sign_page_url = f"{main_url}{sign_url}"
-        print(f"➡️ 访问签到页面: {sign_page_url}")
-        driver.get(sign_page_url)
-
-        wait = WebDriverWait(driver, 20)
-        wait.until(EC.presence_of_element_located((By.ID, 'JD_sign')))
-
-        page_source = driver.page_source
-        if "今日已签" in page_source or "您今天已经签到过了" in page_source:
-            print("✅ 今日已签到")
-            checkIn_status = 0
-            return checkIn_status
-
-        sign_button = driver.find_element(By.ID, 'JD_sign')
-        print("👉 找到签到按钮，准备点击")
-
-        driver.save_screenshot("before_sign.png")
-
-        sign_button.click()
-        print("✅ 已点击签到按钮")
-
-        time.sleep(2)
-
-        driver.save_screenshot("after_sign.png")
-
-        new_page_source = driver.page_source
-        if "今日已签" in new_page_source or "您今天已经签到过了" in new_page_source:
-            print("✅ 签到成功，页面显示今日已签到")
-            checkIn_status = 0
-            return checkIn_status
-        elif "签到成功" in new_page_source:
-            print("🎉 签到成功")
-            checkIn_status = 1
-            return checkIn_status
-        else:
-            print("⚠️ 签到后页面未显示成功信息，尝试刷新页面再次确认")
-
-            driver.refresh()
-            time.sleep(2)
-
-            refresh_page_source = driver.page_source
-            if "今日已签" in refresh_page_source or "您今天已经签到过了" in refresh_page_source:
-                print("✅ 刷新后确认签到成功")
-                checkIn_status = 0
-                return checkIn_status
-
-        checkIn_status = 2
-        print("❌ 签到失败")
-        return checkIn_status
-
-    except Exception as e:
-        print(f"❌ 签到过程中出现异常: {e}")
-        return 2
-
-def printUserInfo(driver, cookies, checkIn_status):
-    """获取用户信息"""
-    try:
-        print("🔎 准备获取用户信息...")
-
-        driver.get(main_url)
-        time.sleep(1)
         
-        driver.delete_all_cookies()
-        for cookie_name, cookie_value in cookies.items():
-            driver.add_cookie({'name': cookie_name, 'value': cookie_value, 'path': '/', 'domain': 'xsijishe.com'})
-
-        sign_page_url = f"{main_url}{sign_url}"
-        print(f"➡️ 访问签到页面: {sign_page_url}")
-        driver.get(sign_page_url)
-
-        wait = WebDriverWait(driver, 20)
-        wait.until(EC.presence_of_element_located((By.ID, 'qiandaobtnnum')))
-
-        qiandao_num = driver.find_element(By.ID, 'qiandaobtnnum').get_attribute('value')
-        lxdays = driver.find_element(By.ID, 'lxdays').get_attribute('value')
-        lxtdays = driver.find_element(By.ID, 'lxtdays').get_attribute('value')
-        lxlevel = driver.find_element(By.ID, 'lxlevel').get_attribute('value')
-        lxreward = driver.find_element(By.ID, 'lxreward').get_attribute('value')
-
-        page_content = driver.page_source
-        if "今日已签" in page_content or "您今天已经签到过了" in page_content:
-            print("✅ 页面显示今日已签到")
-            checkIn_status = 0
-        elif "签到成功" in page_content:
-            print("🎉 页面显示签到成功")
-            checkIn_status = 1
-
-        lxqiandao_content = (
-            f'签到排名：{qiandao_num}\n'
-            f'签到等级：Lv.{lxlevel}\n'
-            f'连续签到：{lxdays} 天\n'
-            f'签到总数：{lxtdays} 天\n'
-            f'签到奖励：{lxreward}\n'
-        )
-
-        profile_url = f'{main_url}/home.php?mod=space'
-        print(f"➡️ 访问个人主页: {profile_url}")
-        driver.get(profile_url)
-
-        wait.until(EC.presence_of_element_located((By.ID, 'ct')))
-        driver.save_screenshot("profile_page.png")
-
-        xm = None
-        xpaths = [
-            '//*[@id="ct"]/div/div[2]/div/div[1]/div[1]/h2',
-            '//div[contains(@class, "h")]/h2',
-            '//h2[contains(@class, "mt")]',
-            '//div[contains(@id, "profile")]//h2'
-        ]
-
-        for xpath in xpaths:
-            elements = driver.find_elements(By.XPATH, xpath)
-            if elements:
-                xm = elements[0].text.strip()
-                print(f"👤 找到用户名: {xm}")
-                break
-        if not xm:
-            print("⚠️ 警告: 无法获取用户名，将使用默认值")
-            xm = "未知用户"
-
-        jf = ww = cp = gx = "未知"
+        seccodeverify = recognize_captcha(base64_img)
+        if not seccodeverify or len(seccodeverify) != 4:
+            print(f"🤖 验证码识别失败: {seccodeverify}")
+            time.sleep(2)
+            continue
+        
+        # 检查验证码
+        if not check_captcha(session, seccodehash, seccodeverify, referer):
+            print(f"❌ 验证码校验失败: {seccodeverify}")
+            time.sleep(2)
+            continue
+        
+        print(f"✅ 验证码识别成功: {seccodeverify}")
+        
+        # 构建登录请求
+        login_url = f"{main_url}/member.php?mod=logging&action=login&loginsubmit=yes&handlekey=login&inajax=1"
+        payload = {
+            "formhash": formhash,
+            "referer": referer,
+            "username": username,
+            "password": password,
+            "questionid": "0",
+            "answer": "",
+            "seccodehash": seccodehash,
+            "seccodemodid": "member::logging",
+            "seccodeverify": seccodeverify,
+        }
+        
         try:
-            stats_container = driver.find_element(By.ID, "psts")
-            stats = stats_container.find_elements(By.TAG_NAME, "li")
-            for stat in stats:
-                text = stat.text.lower()
-                if "积分" in text:
-                    jf = stat.text
-                elif "威望" in text:
-                    ww = stat.text
-                elif "车票" in text:
-                    cp = stat.text
-                elif "贡献" in text:
-                    gx = stat.text
-        except:
-            try:
-                all_elements = driver.find_elements(By.XPATH,
-                                                    "//*[contains(text(), '积分') or contains(text(), '威望') or contains(text(), '车票') or contains(text(), '贡献')]")
-                for element in all_elements:
-                    text = element.text.lower()
-                    if "积分" in text:
-                        jf = element.text
-                    elif "威望" in text:
-                        ww = element.text
-                    elif "车票" in text:
-                        cp = element.text
-                    elif "贡献" in text:
-                        gx = element.text
-            except Exception as e:
-                print(f"❌ 无法获取详细统计信息: {e}")
+            r = session.post(login_url, data=payload, timeout=15)
+            if "欢迎您回来" in r.text or "登录成功" in r.text:
+                print(f"🎉 账户 {username} 登录成功！")
+                return session
+            else:
+                # 尝试解析错误信息
+                soup = BeautifulSoup(r.text, 'html.parser')
+                error_msg = soup.find('div', class_='alert_error')
+                if error_msg:
+                    print(f"❌ 登录失败: {error_msg.get_text(strip=True)}")
+                else:
+                    print(f"❌ 登录失败，未知响应: {r.text[:100]}...")
+        except Exception as e:
+            print(f"❌ 登录请求异常: {e}")
+        
+        time.sleep(3)
+    
+    print(f"❌ 账户 {username} 登录失败，达到最大重试次数")
+    return None
 
-        xm = f"账户【{xm}】".center(24, '=')
+def do_sign_in(session):
+    """执行签到操作"""
+    print("\n⏳ 开始签到流程...")
+    
+    # 访问签到页面获取formhash
+    sign_page_url = f"{main_url}{sign_url}"
+    try:
+        r = session.get(sign_page_url, timeout=TIMEOUT)
+        r.raise_for_status()
+        
+        # 检查是否已签到
+        if "您今天已经签到过了" in r.text or "今日已签" in r.text:
+            print("✅ 今日已签到")
+            return 0  # 已签到状态
+        
+        # 解析formhash
+        soup = BeautifulSoup(r.text, 'html.parser')
+        formhash_input = soup.find('input', {'name': 'formhash'})
+        if not formhash_input:
+            print("❌ 无法找到formhash")
+            return 2  # 失败状态
+        
+        formhash = formhash_input['value']
+        print(f"📝 获取签到formhash: {formhash}")
+        
+        # 提交签到请求
+        sign_action_url = f"{main_url}/plugin.php?id=k_misign:sign&operation=qiandao&formhash={formhash}&format=empty"
+        sign_data = {
+            "formhash": formhash,
+            "qdxq": random.choice(["kx", "ng", "ym", "wl", "nu", "ch", "fd", "yl", "shuai"]),
+            "qdmode": "1",
+            "todaysay": "",
+            "fastreply": "0"
+        }
+        
+        r = session.post(sign_action_url, data=sign_data, timeout=TIMEOUT)
+        r.raise_for_status()
+        
+        # 检查签到结果
+        if "签到成功" in r.text:
+            print("🎉 签到成功")
+            return 1  # 成功状态
+        elif "您今天已经签到过了" in r.text:
+            print("✅ 今日已签到")
+            return 0  # 已签到状态
+        else:
+            print(f"❌ 签到失败: {r.text[:200]}")
+            return 2  # 失败状态
+    
+    except Exception as e:
+        print(f"❌ 签到过程中出错: {e}")
+        return 2  # 失败状态
 
+def get_user_info(session, username, checkIn_status):
+    """获取用户信息"""
+    print("\n🔍 获取用户信息...")
+    
+    # 访问签到页面获取用户数据
+    sign_page_url = f"{main_url}{sign_url}"
+    try:
+        r = session.get(sign_page_url, timeout=TIMEOUT)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # 获取用户信息
+        user_name = "未知用户"
+        user_link = soup.find('a', href=re.compile(r'home.php\?mod=space'))
+        if user_link:
+            user_name = user_link.get_text(strip=True)
+        
+        # 获取签到信息
+        sign_info = {
+            "qiandao_num": "未知",
+            "lxdays": "未知",
+            "lxtdays": "未知",
+            "lxlevel": "未知",
+            "lxreward": "未知"
+        }
+        
+        # 尝试从签到页面获取数据
+        for key in sign_info.keys():
+            element = soup.find('input', {'id': key})
+            if element and 'value' in element.attrs:
+                sign_info[key] = element['value']
+        
+        # 访问个人主页获取更多信息
+        profile_url = f"{main_url}/home.php?mod=space"
+        r = session.get(profile_url, timeout=TIMEOUT)
+        r.raise_for_status()
+        profile_soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # 获取用户积分信息
+        stats = {
+            "积分": "未知",
+            "威望": "未知",
+            "车票": "未知",
+            "贡献": "未知"
+        }
+        
+        # 尝试查找积分信息
+        stats_container = profile_soup.find('ul', id='psts')
+        if stats_container:
+            for li in stats_container.find_all('li'):
+                text = li.get_text(strip=True)
+                for key in stats:
+                    if key in text:
+                        stats[key] = text.replace(key, "").strip()
+        
+        # 构建用户信息字符串
         checkIn_content = ["已签到", "签到成功", "签到失败"]
         info_text = (
-            f'{xm}\n'
-            f'签到状态: {checkIn_content[checkIn_status]} \n'
-            f'{lxqiandao_content} \n'
-            f'当前积分: {jf}\n'
-            f'当前威望: {ww}\n'
-            f'当前车票: {cp}\n'
-            f'当前贡献: {gx}\n\n'
+            f"======== 账户【{user_name}】 ========\n"
+            f"📌 用户名: {username}\n"
+            f"📌 签到状态: {checkIn_content[checkIn_status]}\n\n"
+            f"📊 签到信息:\n"
+            f"  签到排名: {sign_info['qiandao_num']}\n"
+            f"  签到等级: Lv.{sign_info['lxlevel']}\n"
+            f"  连续签到: {sign_info['lxdays']} 天\n"
+            f"  签到总数: {sign_info['lxtdays']} 天\n"
+            f"  签到奖励: {sign_info['lxreward']}\n\n"
+            f"💎 账户资产:\n"
+            f"  积分: {stats['积分']}\n"
+            f"  威望: {stats['威望']}\n"
+            f"  车票: {stats['车票']}\n"
+            f"  贡献: {stats['贡献']}\n"
+            f"==============================\n"
         )
+        
         print(info_text)
         return True
-
+    
     except Exception as e:
-        print(f'❌ 获取用户信息失败: {e}')
-        try:
-            driver.save_screenshot("error_screenshot.png")
-            print("保存错误截图到 error_screenshot.png")
-        except:
-            pass
+        print(f"❌ 获取用户信息失败: {e}")
         return False
 
 def process_account(account):
@@ -399,39 +376,24 @@ def process_account(account):
     username = account["username"]
     password = account["password"]
     
-    print(f"\n======= 开始处理账户: {username} =======")
+    print(f"\n{'='*50}")
+    print(f"🚀 开始处理账户: {username}")
+    print(f"{'='*50}")
     
-    # 登录
-    login_success, cookies = login_by_requests(username, password)
-    if not login_success:
-        print(f"❌ 账户 {username} 登录失败")
-        return
+    # 登录账户
+    session = login_account(username, password)
+    if not session:
+        print(f"❌ 账户 {username} 处理失败")
+        return False
     
-    # 创建浏览器实例
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    driver = webdriver.Chrome(options=chrome_options)
+    # 执行签到
+    checkIn_status = do_sign_in(session)
     
-    try:
-        # 签到
-        checkIn_status = do_sign_in(driver, cookies)
-        if checkIn_status == 0 or checkIn_status == 1:
-            print(f"✔️ 账户 {username} 签到操作完成")
-        else:
-            print(f"❌ 账户 {username} 签到操作失败")
-        
-        # 获取用户信息
-        printUserInfo(driver, cookies, checkIn_status)
-        
-    except Exception as e:
-        print(f"❌ 处理账户 {username} 时发生异常: {e}")
-    finally:
-        driver.quit()
+    # 获取用户信息
+    get_user_info(session, username, checkIn_status)
     
-    print(f"======= 账户 {username} 处理完成 =======\n")
+    print(f"✅ 账户 {username} 处理完成\n")
+    return True
 
 if __name__ == "__main__":
     # 解析多账户配置
@@ -444,7 +406,9 @@ if __name__ == "__main__":
     print(f"🔍 找到 {len(accounts)} 个账户")
     
     # 处理每个账户
+    success_count = 0
     for account in accounts:
-        process_account(account)
+        if process_account(account):
+            success_count += 1
     
-    print("✅ 所有账户处理完成")
+    print(f"\n✅ 所有账户处理完成，成功: {success_count}/{len(accounts)}")
