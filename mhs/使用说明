@@ -1,0 +1,14 @@
+抓取必要参数：
+使用抓包工具（如Charles或Fiddler）抓取 https://bxo30.xyz/api/user/qd 请求
+获取请求体中的 encryptedData 和 iv 参数值
+
+青龙面板环境变量配置：
+
+MHS_USERNAME: 你的账号
+MHS_PASSWORD: 你的密码
+MHS_ENCRYPTED_DATA: 抓取到的 encryptedData 值
+MHS_IV: 抓取到的 iv 值
+
+依赖安装：
+pycryptodomex
+requests
