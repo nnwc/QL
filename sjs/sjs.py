@@ -91,7 +91,9 @@ def recognize_captcha(base64_img):
     try:
         resp = requests.post(OCR_SERVICE, json={"image": base64_img}, timeout=TIMEOUT)
         if resp.ok:
-            return resp.json().get("result", "").strip()
+            # 确保验证码长度为4位
+            result = resp.json().get("result", "").strip()
+            return result[:4]  # 只取前4位字符
         return ""
     except Exception as e:
         print(f"🤖 OCR识别错误: {e}")
@@ -154,7 +156,8 @@ def check_captcha(session, seccodehash, seccodeverify, referer):
     }
     try:
         r = session.get(url, params=params, timeout=TIMEOUT)
-        return r.ok and "succeed" in r.text
+        # 直接检查响应文本内容
+        return "succeed" in r.text
     except Exception as e:
         print(f"❌ 验证码校验异常: {e}")
         return False
@@ -223,17 +226,38 @@ def login_account(username, password):
         
         try:
             r = session.post(login_url, data=payload, timeout=15)
-            if "欢迎您回来" in r.text or "登录成功" in r.text:
-                print(f"🎉 账户 {username} 登录成功！")
-                return session
-            else:
-                # 尝试解析错误信息
-                soup = BeautifulSoup(r.text, 'html.parser')
-                error_msg = soup.find('div', class_='alert_error')
-                if error_msg:
-                    print(f"❌ 登录失败: {error_msg.get_text(strip=True)}")
+            
+            # 处理XML格式的响应
+            if "<?xml" in r.text:
+                # 从XML中提取错误信息
+                cdata_match = re.search(r'<!\[CDATA\[(.*?)\]\]>', r.text, re.DOTALL)
+                if cdata_match:
+                    error_content = cdata_match.group(1)
+                    if "欢迎您回来" in error_content or "登录成功" in error_content:
+                        print(f"🎉 账户 {username} 登录成功！")
+                        return session
+                    else:
+                        # 提取错误信息
+                        error_match = re.search(r'<font color="red">(.*?)</font>', error_content)
+                        if error_match:
+                            print(f"❌ 登录失败: {error_match.group(1)}")
+                        else:
+                            print(f"❌ 登录失败: {error_content[:100]}...")
                 else:
-                    print(f"❌ 登录失败，未知响应: {r.text[:100]}...")
+                    print(f"❌ 登录失败，未知XML响应: {r.text[:100]}...")
+            else:
+                # 处理HTML格式的响应
+                if "欢迎您回来" in r.text or "登录成功" in r.text:
+                    print(f"🎉 账户 {username} 登录成功！")
+                    return session
+                else:
+                    # 尝试解析错误信息
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    error_msg = soup.find('div', class_='alert_error')
+                    if error_msg:
+                        print(f"❌ 登录失败: {error_msg.get_text(strip=True)}")
+                    else:
+                        print(f"❌ 登录失败，未知响应: {r.text[:100]}...")
         except Exception as e:
             print(f"❌ 登录请求异常: {e}")
         
@@ -417,5 +441,6 @@ if __name__ == "__main__":
     for account in accounts:
         if process_account(account):
             success_count += 1
+        time.sleep(random.uniform(1, 3))  # 账户间随机延迟
     
     print(f"\n✅ 所有账户处理完成，成功: {success_count}/{len(accounts)}")
