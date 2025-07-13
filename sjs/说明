@@ -1,0 +1,17 @@
+青龙面板配置说明：
+添加环境变量：
+XSJ_USERNAME：你的账号
+XSJ_PASSWORD：你的密码
+OCR_SERVICE：自部署的OCR服务地址
+
+依赖安装：
+
+requests
+selenium
+pillow
+
+浏览器驱动：
+确保青龙面板的Docker环境中已安装Chrome浏览器及驱动：
+
+apt-get update
+apt-get install -y chromium chromium-driver
